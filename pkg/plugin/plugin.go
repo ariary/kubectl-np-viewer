@@ -620,7 +620,6 @@ func addNetworkPolicies(cmd *cobra.Command, networkPolicies *netv1.NetworkPolicy
 
 // addNetworkPolicy: add a network policy within a list
 func addNetworkPolicy(networkPolicies []netv1.NetworkPolicy, file string, namespace string) ([]netv1.NetworkPolicy, error) {
-	updatedList := networkPolicies
 	netpol, err := decodeNetpolFromYaml(file)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to decode yaml file")
@@ -629,5 +628,5 @@ func addNetworkPolicy(networkPolicies []netv1.NetworkPolicy, file string, namesp
 		networkPolicies = append(networkPolicies, *netpol)
 	}
 
-	return updatedList, nil
+	return networkPolicies, nil
 }
