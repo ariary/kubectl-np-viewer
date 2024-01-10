@@ -71,6 +71,7 @@ func RunPlugin(configFlags *genericclioptions.ConfigFlags, cmd *cobra.Command) e
 	isEgress := getFlagBool(cmd, "egress")
 	podName := util.GetFlagString(cmd, "pod")
 	toPodName := util.GetFlagString(cmd, "to-pod")
+	fromPodName := util.GetFlagString(cmd, "from-pod")
 
 	if getFlagBool(cmd, "all-namespaces") {
 		namespace = ""
@@ -178,23 +179,21 @@ func RunPlugin(configFlags *genericclioptions.ConfigFlags, cmd *cobra.Command) e
 	}
 
 	if toPodName != "" {
-		toNamespace := namespace
-		to := strings.Split(toPodName, ":")
-		if len(to) == 2 {
-			toNamespace = to[0]
-			toPodName = to[1]
-		}
-		toPod, err := getPod(clientset, toNamespace, toPodName)
+		toPod, toNamespace, err := parsePodEndpoint(clientset, toPodName, namespace)
 		if err != nil {
-			return errors.Wrap(err, "failed getting pod")
-		}
-		// check ns selector
-		toNamespaceStruct, err := getNamespace(clientset, toNamespace)
-		if err != nil {
-			return errors.Wrap(err, "failed retrieveing ns")
+			return errors.Wrap(err, "failed to initialize pod endpoint (--to)")
 		}
 
-		tableLines = filterLinesBasedOnToPodLabels(tableLines, toPod, toNamespaceStruct)
+		tableLines = filterLinesBasedOnToPodLabels(tableLines, toPod, toNamespace)
+	}
+
+	if fromPodName != "" {
+		fromPod, fromNamespace, err := parsePodEndpoint(clientset, fromPodName, namespace)
+		if err != nil {
+			return errors.Wrap(err, "failed to initialize pod endpoint (--from)")
+		}
+
+		tableLines = filterLinesBasedOnFromPodLabels(tableLines, fromPod, fromNamespace)
 	}
 
 	if len(tableLines) == 0 {
@@ -440,11 +439,12 @@ func filterLinesBasedOnPodLabels(tableLines []TableLine, pod *corev1.Pod) []Tabl
 	return filteredTable
 }
 
-// Filters lines in the result table based on the pod labels that we targetting
-func filterLinesBasedOnToPodLabels(tableLines []TableLine, pod *corev1.Pod, ns *corev1.Namespace) []TableLine {
+// Filters lines in the result table based on the pod labels. Depending on the pod labels we will filter either on egress traffic or on ingress traffic.
+// policyTypeFilter: Ingress if we want to only look at egress traffic, Egress otherwise
+func filterLinesBasedOnSpecifictraffic(tableLines []TableLine, pod *corev1.Pod, ns *corev1.Namespace, policyTypeFilter string) []TableLine {
 	var filteredTable []TableLine
 	for _, line := range tableLines {
-		if line.policyType == Ingress {
+		if line.policyType == policyTypeFilter {
 			continue
 		}
 		okNs := true
@@ -491,6 +491,16 @@ func filterLinesBasedOnToPodLabels(tableLines []TableLine, pod *corev1.Pod, ns *
 		}
 	}
 	return filteredTable
+}
+
+// Filters lines in the result table based on the pod labels that we want to target with egress traffic
+func filterLinesBasedOnToPodLabels(tableLines []TableLine, pod *corev1.Pod, ns *corev1.Namespace) []TableLine {
+	return filterLinesBasedOnSpecifictraffic(tableLines, pod, ns, Ingress)
+}
+
+// Filters lines in the result table based on the pod labels that we accept ingress from
+func filterLinesBasedOnFromPodLabels(tableLines []TableLine, pod *corev1.Pod, ns *corev1.Namespace) []TableLine {
+	return filterLinesBasedOnSpecifictraffic(tableLines, pod, ns, Egress)
 }
 
 // checkLabelCondition: check that a single label selector condition line is satisfied given a pod/ns labels.
@@ -629,4 +639,28 @@ func addNetworkPolicy(networkPolicies []netv1.NetworkPolicy, file string, namesp
 	}
 
 	return networkPolicies, nil
+}
+
+// getNamespace: return a namespace given its name
+func getNamespace(clientset *kubernetes.Clientset, namespace string) (result *corev1.Namespace, err error) {
+	return clientset.CoreV1().Namespaces().Get(context.TODO(), namespace, metav1.GetOptions{})
+}
+
+// parsePodEndpoint: parse pod endpoint [ns]:[pod_name] or juste [pod] and return ns and pod struct associated
+func parsePodEndpoint(clientset *kubernetes.Clientset, podName string, namespace string) (pod *corev1.Pod, ns *corev1.Namespace, err error) {
+	podEndpoint := strings.Split(podName, ":")
+	if len(podEndpoint) == 2 {
+		namespace = podEndpoint[0]
+		podName = podEndpoint[1]
+	}
+	pod, err = getPod(clientset, namespace, podName)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "failed getting pod")
+	}
+	// check ns selector
+	ns, err = getNamespace(clientset, namespace)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "failed retrieveing ns")
+	}
+	return pod, ns, nil
 }
