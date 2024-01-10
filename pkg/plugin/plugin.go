@@ -70,6 +70,7 @@ func RunPlugin(configFlags *genericclioptions.ConfigFlags, cmd *cobra.Command) e
 	isIngress := getFlagBool(cmd, "ingress")
 	isEgress := getFlagBool(cmd, "egress")
 	podName := util.GetFlagString(cmd, "pod")
+	toPodName := util.GetFlagString(cmd, "to-pod")
 
 	if getFlagBool(cmd, "all-namespaces") {
 		namespace = ""
@@ -80,24 +81,12 @@ func RunPlugin(configFlags *genericclioptions.ConfigFlags, cmd *cobra.Command) e
 		return errors.Wrap(err, "failed to list network policies")
 	}
 	//add netpol
-	addNp, err := cmd.Flags().GetStringSlice("add-np")
-	if err != nil {
-		return errors.Wrap(err, "failed to get list from --add-np flag")
-	}
-	for _, yamlNp := range addNp {
-		netpol, err := decodeNetpolFromYaml(yamlNp)
-		if err != nil {
-			return errors.Wrap(err, "failed todecode yaml file")
-		}
-		networkPolicies.Items = append(networkPolicies.Items, *netpol)
+	if networkPolicies, err = addNetworkPolicies(cmd, networkPolicies, namespace); err != nil {
+		return errors.Wrap(err, "failed to add netpols")
 	}
 	// delete netpol
-	delNp, err := cmd.Flags().GetStringSlice("del-np")
-	if err != nil {
-		return errors.Wrap(err, "failed to get list from --del-np flag")
-	}
-	for _, netpol := range delNp {
-		networkPolicies.Items = deleteNetworkPolicy(networkPolicies.Items, netpol)
+	if networkPolicies, err = deleteNetworkPolicies(cmd, networkPolicies); err != nil {
+		return errors.Wrap(err, "failed to delete netpols")
 	}
 
 	var tableLines []TableLine
@@ -186,6 +175,26 @@ func RunPlugin(configFlags *genericclioptions.ConfigFlags, cmd *cobra.Command) e
 			return errors.Wrap(err, "failed getting pod")
 		}
 		tableLines = filterLinesBasedOnPodLabels(tableLines, pod)
+	}
+
+	if toPodName != "" {
+		toNamespace := namespace
+		to := strings.Split(toPodName, ":")
+		if len(to) == 2 {
+			toNamespace = to[0]
+			toPodName = to[1]
+		}
+		toPod, err := getPod(clientset, toNamespace, toPodName)
+		if err != nil {
+			return errors.Wrap(err, "failed getting pod")
+		}
+		// check ns selector
+		toNamespaceStruct, err := getNamespace(clientset, toNamespace)
+		if err != nil {
+			return errors.Wrap(err, "failed retrieveing ns")
+		}
+
+		tableLines = filterLinesBasedOnToPodLabels(tableLines, toPod, toNamespaceStruct)
 	}
 
 	if len(tableLines) == 0 {
@@ -416,7 +425,7 @@ func filterLinesBasedOnPodLabels(tableLines []TableLine, pod *corev1.Pod) []Tabl
 			labels := strings.Split(line.pods, "\n")
 			appendLine := true
 			for _, labelCondition := range labels {
-				if !checkLabelCondition(labelCondition, pod) {
+				if !checkLabelCondition(labelCondition, pod.Labels) {
 					appendLine = false
 					break
 				}
@@ -431,21 +440,74 @@ func filterLinesBasedOnPodLabels(tableLines []TableLine, pod *corev1.Pod) []Tabl
 	return filteredTable
 }
 
-// checkLabelCondition: check that a single label selector condition line is satisfied given a pod spec.
+// Filters lines in the result table based on the pod labels that we targetting
+func filterLinesBasedOnToPodLabels(tableLines []TableLine, pod *corev1.Pod, ns *corev1.Namespace) []TableLine {
+	var filteredTable []TableLine
+	for _, line := range tableLines {
+		if line.policyType == Ingress {
+			continue
+		}
+		okNs := true
+		// check ns
+		if pod.Namespace != line.namespace {
+			if line.policyNamespace != Wildcard {
+				if line.policyNamespace == Deny {
+					okNs = false
+				} else {
+					nsLabels := strings.Split(line.policyNamespace, "\n")
+					for _, labelCondition := range nsLabels {
+						if !checkLabelCondition(labelCondition, ns.Labels) {
+							okNs = false
+							break
+						}
+					}
+				}
+			}
+			if !okNs {
+				continue
+			}
+		}
+		// check pod
+		if line.policyPods != Wildcard {
+			appendLine := true
+			if line.policyPods == Deny {
+				appendLine = false
+			} else {
+				labels := strings.Split(line.policyPods, "\n")
+
+				for _, labelCondition := range labels {
+					if !checkLabelCondition(labelCondition, pod.Labels) {
+						appendLine = false
+						break
+					}
+				}
+			}
+
+			if appendLine {
+				filteredTable = append(filteredTable, line)
+			}
+		} else {
+			filteredTable = append(filteredTable, line)
+		}
+	}
+	return filteredTable
+}
+
+// checkLabelCondition: check that a single label selector condition line is satisfied given a pod/ns labels.
 // It support matchLabels and matchExpressions conditions type
-func checkLabelCondition(labelCondition string, pod *corev1.Pod) bool {
+func checkLabelCondition(labelCondition string, labels map[string]string) bool {
 	keyValue := strings.Split(labelCondition, "=")
 	key := keyValue[0]
 	value := keyValue[1]
 	if strings.HasPrefix(key, "^(") { // Label line: '^(label)=*'
-		return checkDoesNotExistCondition(key, pod)
+		return checkDoesNotExistCondition(key, labels)
 	} else if value == "*" { // prefix should be != '^(' also, Label line: 'label=*'
-		return checkExistCondition(key, pod)
+		return checkExistCondition(key, labels)
 	} else if strings.HasPrefix(value, "^(") { // Label line: 'label=(value1|...|valueN)'
-		return checkNotInCondition(key, value, pod)
+		return checkNotInCondition(key, value, labels)
 	} else if strings.HasPrefix(value, "(") { // Label line: 'label=^(value1|...|valueN)'
-		return checkInCondition(key, value, pod)
-	} else if pod.Labels[keyValue[0]] != keyValue[1] { // simple label filter
+		return checkInCondition(key, value, labels)
+	} else if labels[keyValue[0]] != keyValue[1] { // simple label filter
 		return false
 	}
 
@@ -454,23 +516,23 @@ func checkLabelCondition(labelCondition string, pod *corev1.Pod) bool {
 
 // checkExistCondition: check an Exist filter against a pod spec. label line: 'label=*'.
 // Return true if the label key exist in pod spec
-func checkExistCondition(key string, pod *corev1.Pod) bool {
+func checkExistCondition(key string, labels map[string]string) bool {
 	key = strings.TrimSuffix(strings.TrimPrefix(key, "("), ")")
-	_, exist := pod.Labels[key]
+	_, exist := labels[key]
 	return exist
 }
 
 // checkDoesNotExistCondition: check a DoesNotExist filter against a pod spec. Label line: '^(label)=*'
 // // Return true if the label key does not exist in pod spec
-func checkDoesNotExistCondition(key string, pod *corev1.Pod) bool {
+func checkDoesNotExistCondition(key string, labels map[string]string) bool {
 	isolateKey := strings.TrimSuffix(strings.TrimPrefix(key, "^("), ")")
-	return !checkExistCondition(isolateKey, pod)
+	return !checkExistCondition(isolateKey, labels)
 }
 
 // checkInCondition: check an NotIn filter against a pod spec. label line: 'label=(value1|...|valueN)'
 // Return true if the label key if and only if the label exist and does not have specific values
-func checkInCondition(key, value string, pod *corev1.Pod) bool {
-	podLabelValue, exist := pod.Labels[key]
+func checkInCondition(key, value string, labels map[string]string) bool {
+	podLabelValue, exist := labels[key]
 	if !exist {
 		return false
 	}
@@ -486,8 +548,8 @@ func checkInCondition(key, value string, pod *corev1.Pod) bool {
 
 // checkNotInCondition: check an NotIn filter against a pod spec. label line: 'label=^(value1|...|valueN)'
 // Return true if the label key is not set in pod OR do not have specific values
-func checkNotInCondition(key, value string, pod *corev1.Pod) bool {
-	return !checkInCondition(key, strings.TrimPrefix(value, "^"), pod)
+func checkNotInCondition(key, value string, labels map[string]string) bool {
+	return !checkInCondition(key, strings.TrimPrefix(value, "^"), labels)
 }
 
 // Returns true if the slice contains the policy type
@@ -517,6 +579,18 @@ func decodeNetpolFromYaml(file string) (netpol *netv1.NetworkPolicy, err error) 
 	return netpol, nil
 }
 
+// deleteNetworkPolicies:delete specified netpols
+func deleteNetworkPolicies(cmd *cobra.Command, networkPolicies *netv1.NetworkPolicyList) (*netv1.NetworkPolicyList, error) {
+	delNp, err := cmd.Flags().GetStringSlice("del-np")
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get list from --del-np flag")
+	}
+	for _, netpol := range delNp {
+		networkPolicies.Items = deleteNetworkPolicy(networkPolicies.Items, netpol)
+	}
+	return networkPolicies, nil
+}
+
 // deleteNetworkPolicy: delete a network policy from a list
 func deleteNetworkPolicy(networkPolicies []netv1.NetworkPolicy, nameToDelete string) []netv1.NetworkPolicy {
 	var updatedList []netv1.NetworkPolicy
@@ -528,4 +602,32 @@ func deleteNetworkPolicy(networkPolicies []netv1.NetworkPolicy, nameToDelete str
 	}
 
 	return updatedList
+}
+
+// addNetworkPolicies: add all netpols
+func addNetworkPolicies(cmd *cobra.Command, networkPolicies *netv1.NetworkPolicyList, namespace string) (*netv1.NetworkPolicyList, error) {
+	addNp, err := cmd.Flags().GetStringSlice("add-np")
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get list from --add-np flag")
+	}
+	for _, yamlNp := range addNp {
+		if networkPolicies.Items, err = addNetworkPolicy(networkPolicies.Items, yamlNp, namespace); err != nil {
+			return nil, errors.Wrap(err, "failed to get add netpol")
+		}
+	}
+	return networkPolicies, nil
+}
+
+// addNetworkPolicy: add a network policy within a list
+func addNetworkPolicy(networkPolicies []netv1.NetworkPolicy, file string, namespace string) ([]netv1.NetworkPolicy, error) {
+	updatedList := networkPolicies
+	netpol, err := decodeNetpolFromYaml(file)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to decode yaml file")
+	}
+	if netpol.Namespace == namespace || namespace == "" {
+		networkPolicies = append(networkPolicies, *netpol)
+	}
+
+	return updatedList, nil
 }

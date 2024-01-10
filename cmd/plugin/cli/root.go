@@ -19,7 +19,7 @@ var (
 
 func RootCmd() *cobra.Command {
 	var ingress, egress, allNamespaces bool
-	var pod string
+	var pod, toPod string
 	var addNp, delNp []string
 
 	cmd := &cobra.Command{
@@ -71,15 +71,57 @@ func RootCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&pod, "pod", "p", "",
 		"Only selects network policies rules applied to a specific pod")
 
-	cmd.Flags().StringSliceVarP(&addNp, "add-np", "a", []string{},
+	cmd.PersistentFlags().StringSliceVarP(&addNp, "add-np", "a", []string{},
 		"Additional netpol to use without applying in the cluster.(must be relative path to netpol YAML file)")
 
-	cmd.Flags().StringSliceVarP(&delNp, "del-np", "d", []string{},
-		"Delete netpol from output. (must be netpol name))")
+	cmd.PersistentFlags().StringSliceVarP(&delNp, "del-np", "d", []string{},
+		"Delete netpol from output. (must be netpol name)")
+
+	cmd.Flags().StringVarP(&toPod, "to-pod", "t", "",
+		"Only selects egress network policies rules enabling traffic to a specific pod. To specify a pod in the same ns --to-pod=[pod_name] in another namespace --to-pod=[ns]:[pod_name]")
+	cmd.MarkFlagsMutuallyExclusive("ingress", "to-pod")
 	KubernetesConfigFlags = genericclioptions.NewConfigFlags(false)
 	KubernetesConfigFlags.AddFlags(cmd.Flags())
 
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+
+	testerCmd := &cobra.Command{
+		Use:   "tester",
+		Short: "Answer the question \"Does this network flux is authorized in my cluster?\"",
+		PreRun: func(cmd *cobra.Command, args []string) {
+			viper.BindPFlags(cmd.Flags())
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			log := logger.NewLogger()
+			log.Info("")
+
+			finishedCh := make(chan bool, 1)
+			go func() {
+				for {
+					select {
+					case <-finishedCh:
+						fmt.Printf("\r")
+						return
+					}
+				}
+			}()
+
+			defer func() {
+				finishedCh <- true
+			}()
+
+			if err := plugin.RunTester(KubernetesConfigFlags, cmd); err != nil {
+				return errors.Cause(err)
+			}
+			return nil
+		},
+	}
+	testerCmd.Flags().StringP("from", "f", "", "specify source endpoint for the flux")
+	testerCmd.MarkFlagRequired("from")
+	testerCmd.Flags().StringP("to", "t", "", "specify destination  endpoint for the flux")
+	testerCmd.MarkFlagRequired("to")
+
+	cmd.AddCommand(testerCmd)
 	return cmd
 }
 
