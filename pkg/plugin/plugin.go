@@ -1,19 +1,16 @@
 package plugin
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
 
-	"github.com/olekukonko/tablewriter"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -47,24 +44,24 @@ const (
 	PodAndNameSpaceSelector SourceType = 4
 )
 
-// Runs the plugin
-func RunPlugin(configFlags *genericclioptions.ConfigFlags, cmd *cobra.Command) error {
+// GetTableNetpolLines: get all the netpols corresponding to the research
+func GetTableNetpolLines(configFlags *genericclioptions.ConfigFlags, cmd *cobra.Command) ([]TableLine, error) {
 	factory := util.NewFactory(configFlags)
 	clientConfig := factory.ToRawKubeConfigLoader()
 	config, err := factory.ToRESTConfig()
 
 	if err != nil {
-		return errors.Wrap(err, "failed to read kubeconfig")
+		return nil, errors.Wrap(err, "failed to read kubeconfig")
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		return errors.Wrap(err, "failed to create clientset")
+		return nil, errors.Wrap(err, "failed to create clientset")
 	}
 
 	namespace, _, err := clientConfig.Namespace()
 	if err != nil {
-		return errors.WithMessage(err, "Failed getting namespace")
+		return nil, errors.WithMessage(err, "Failed getting namespace")
 	}
 
 	isIngress := getFlagBool(cmd, "ingress")
@@ -79,15 +76,15 @@ func RunPlugin(configFlags *genericclioptions.ConfigFlags, cmd *cobra.Command) e
 
 	networkPolicies, err := getNetworkPolicies(clientset, namespace)
 	if err != nil {
-		return errors.Wrap(err, "failed to list network policies")
+		return nil, errors.Wrap(err, "failed to list network policies")
 	}
 	//add netpol
 	if networkPolicies, err = addNetworkPolicies(cmd, networkPolicies, namespace); err != nil {
-		return errors.Wrap(err, "failed to add netpols")
+		return nil, errors.Wrap(err, "failed to add netpols")
 	}
 	// delete netpol
 	if networkPolicies, err = deleteNetworkPolicies(cmd, networkPolicies); err != nil {
-		return errors.Wrap(err, "failed to delete netpols")
+		return nil, errors.Wrap(err, "failed to delete netpols")
 	}
 
 	var tableLines []TableLine
@@ -105,7 +102,6 @@ func RunPlugin(configFlags *genericclioptions.ConfigFlags, cmd *cobra.Command) e
 					tableLines = append(tableLines, createTableLineWithWildcard(policy, Ingress))
 					continue
 				}
-
 				for _, peer := range ingresses.From {
 					if peer.PodSelector != nil && peer.NamespaceSelector != nil {
 						tableLines = append(tableLines, createTableLineForSourceType(policy, peer, ingresses.Ports,
@@ -173,7 +169,7 @@ func RunPlugin(configFlags *genericclioptions.ConfigFlags, cmd *cobra.Command) e
 	if len(podName) > 0 {
 		pod, err := getPod(clientset, namespace, podName)
 		if err != nil {
-			return errors.Wrap(err, "failed getting pod")
+			return nil, errors.Wrap(err, "failed getting pod")
 		}
 		tableLines = filterLinesBasedOnPodLabels(tableLines, pod)
 	}
@@ -181,27 +177,21 @@ func RunPlugin(configFlags *genericclioptions.ConfigFlags, cmd *cobra.Command) e
 	if toPodName != "" {
 		toPod, toNamespace, err := parsePodEndpoint(clientset, toPodName, namespace)
 		if err != nil {
-			return errors.Wrap(err, "failed to initialize pod endpoint (--to)")
+			return nil, errors.Wrap(err, "failed to initialize pod endpoint (--to)")
 		}
-
 		tableLines = filterLinesBasedOnToPodLabels(tableLines, toPod, toNamespace)
 	}
 
 	if fromPodName != "" {
 		fromPod, fromNamespace, err := parsePodEndpoint(clientset, fromPodName, namespace)
 		if err != nil {
-			return errors.Wrap(err, "failed to initialize pod endpoint (--from)")
+			return nil, errors.Wrap(err, "failed to initialize pod endpoint (--from)")
 		}
 
 		tableLines = filterLinesBasedOnFromPodLabels(tableLines, fromPod, fromNamespace)
 	}
 
-	if len(tableLines) == 0 {
-		return errors.New("No network policy was found")
-	}
-
-	renderTable(tableLines)
-	return nil
+	return tableLines, nil
 }
 
 // Creates a new line for the result table
@@ -297,12 +287,12 @@ func createTableLineForPortBlock(policy netv1.NetworkPolicy, ports []netv1.Netwo
 
 // Sorts and joins the labels with a new space delimiter based on podSelector field
 func sortAndJoinLabels(podSelector metav1.LabelSelector) string {
-
+	var macthExpressionLines string
 	if len(podSelector.MatchExpressions) != 0 {
-		return sortAndJoinLabelsForMatchExpressions(podSelector.MatchExpressions)
+		macthExpressionLines = sortAndJoinLabelsForMatchExpressions(podSelector.MatchExpressions)
 	}
 
-	return sortAndJoinLabelsForMatchLabels(podSelector.MatchLabels)
+	return macthExpressionLines + sortAndJoinLabelsForMatchLabels(podSelector.MatchLabels)
 }
 
 // Sorts and joins the labels with a new space delimiter by parsing MatchLabels field
@@ -331,58 +321,17 @@ func sortAndJoinLabelsForMatchExpressions(matchExpressions []metav1.LabelSelecto
 		case metav1.LabelSelectorOpExists:
 			result = addCharIfNotEmpty(result, "\n") + fmt.Sprintf("%s=%s", key, "*")
 		case metav1.LabelSelectorOpDoesNotExist:
-			result = addCharIfNotEmpty(result, "\n") + fmt.Sprintf("^(%s)=%s", key, "*")
+			result = addCharIfNotEmpty(result, "\n") + fmt.Sprintf("!(%s)=%s", key, "*")
 		case metav1.LabelSelectorOpIn:
 			labelValues := "(" + strings.Join(expression.Values, "|") + ")"
 			result = addCharIfNotEmpty(result, "\n") + fmt.Sprintf("%s=%s", key, labelValues)
 		case metav1.LabelSelectorOpNotIn:
 			labelValues := "(" + strings.Join(expression.Values, "|") + ")"
-			result = addCharIfNotEmpty(result, "\n") + fmt.Sprintf("%s=%s", key, "^"+labelValues)
+			result = addCharIfNotEmpty(result, "\n") + fmt.Sprintf("%s=%s", key, "!"+labelValues)
 		}
 	}
 
 	return result
-}
-
-// Returns the list of network policies
-func getNetworkPolicies(clientset *kubernetes.Clientset, namespace string) (result *netv1.NetworkPolicyList,
-	err error) {
-
-	return clientset.NetworkingV1().NetworkPolicies(namespace).List(context.TODO(),
-		metav1.ListOptions{})
-}
-
-// Returns the pod based on the name and namespace
-func getPod(clientset *kubernetes.Clientset, namespace string, podName string) (result *corev1.Pod, err error) {
-	selector := fields.OneTermEqualSelector("metadata.name", podName)
-	podList, err := clientset.CoreV1().Pods(namespace).List(context.TODO(),
-		metav1.ListOptions{FieldSelector: selector.String()})
-
-	if len(podList.Items) == 0 {
-		err = errors.New(fmt.Sprintf("Pods \"%s\" not found", podName))
-	} else {
-		result = &podList.Items[0]
-	}
-	return
-}
-
-// Renders the result table
-func renderTable(tableLines []TableLine) {
-	var data [][]string
-	for _, line := range tableLines {
-		stringLine := []string{line.networkPolicyName, line.policyType, line.namespace, line.pods, line.policyNamespace,
-			line.policyPods, line.policyIpBlock, line.policyPort}
-		data = append(data, stringLine)
-	}
-
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Network Policy", "Type", "Namespace", "Pods", "Namespaces Selector", "Pods Selector",
-		"IP Block", "Ports"})
-	table.SetAutoMergeCells(false)
-	table.SetRowLine(true)
-	table.SetAlignment(tablewriter.ALIGN_CENTER)
-	table.AppendBulk(data)
-	table.Render()
 }
 
 // Returns the protocol as string
@@ -439,68 +388,60 @@ func filterLinesBasedOnPodLabels(tableLines []TableLine, pod *corev1.Pod) []Tabl
 	return filteredTable
 }
 
-// Filters lines in the result table based on the pod labels. Depending on the pod labels we will filter either on egress traffic or on ingress traffic.
+// Filters lines in the result table based on the pod and s labels. Depending on the pod/ns labels we will filter either on egress traffic or on ingress traffic.
 // policyTypeFilter: Ingress if we want to only look at egress traffic, Egress otherwise
 func filterLinesBasedOnSpecifictraffic(tableLines []TableLine, pod *corev1.Pod, ns *corev1.Namespace, policyTypeFilter string) []TableLine {
 	var filteredTable []TableLine
 	for _, line := range tableLines {
-		if line.policyType == policyTypeFilter {
+		if line.policyType != policyTypeFilter {
 			continue
 		}
-		okNs := true
-		// check ns
-		if pod.Namespace != line.namespace {
-			if line.policyNamespace != Wildcard {
-				if line.policyNamespace == Deny {
-					okNs = false
-				} else {
-					nsLabels := strings.Split(line.policyNamespace, "\n")
-					for _, labelCondition := range nsLabels {
-						if !checkLabelCondition(labelCondition, ns.Labels) {
-							okNs = false
-							break
-						}
-					}
-				}
-			}
-			if !okNs {
-				continue
-			}
-		}
-		// check pod
-		if line.policyPods != Wildcard {
-			appendLine := true
-			if line.policyPods == Deny {
-				appendLine = false
-			} else {
-				labels := strings.Split(line.policyPods, "\n")
 
-				for _, labelCondition := range labels {
-					if !checkLabelCondition(labelCondition, pod.Labels) {
-						appendLine = false
-						break
-					}
-				}
-			}
-
-			if appendLine {
-				filteredTable = append(filteredTable, line)
-			}
-		} else {
-			filteredTable = append(filteredTable, line)
+		// Either only Pod Selector, or NamespaceSelector Or both
+		if !checkPolicyConditionWithLabels(line.policyPods, pod.Labels) {
+			continue
 		}
+
+		if !checkPolicyConditionWithLabels(line.policyNamespace, ns.Labels) {
+			continue
+		}
+
+		// if here pod & ns selector ok
+		filteredTable = append(filteredTable, line)
+
 	}
+
 	return filteredTable
 }
 
 // Filters lines in the result table based on the pod labels that we want to target with egress traffic
 func filterLinesBasedOnToPodLabels(tableLines []TableLine, pod *corev1.Pod, ns *corev1.Namespace) []TableLine {
-	return filterLinesBasedOnSpecifictraffic(tableLines, pod, ns, Ingress)
+	return filterLinesBasedOnSpecifictraffic(tableLines, pod, ns, Egress)
 }
 
 // Filters lines in the result table based on the pod labels that we accept ingress from
 func filterLinesBasedOnFromPodLabels(tableLines []TableLine, pod *corev1.Pod, ns *corev1.Namespace) []TableLine {
-	return filterLinesBasedOnSpecifictraffic(tableLines, pod, ns, Egress)
+	return filterLinesBasedOnSpecifictraffic(tableLines, pod, ns, Ingress)
+}
+
+// checkPolicyCondition: check that a policy (string) is affecting labels
+func checkPolicyConditionWithLabels(condition string, labels map[string]string) (ok bool) {
+	if condition == Wildcard {
+		return true
+	}
+
+	if condition == Deny {
+		return false
+	}
+
+	conditionLabels := strings.Split(condition, "\n")
+	for _, conditionLabel := range conditionLabels {
+		if !checkLabelCondition(conditionLabel, labels) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // checkLabelCondition: check that a single label selector condition line is satisfied given a pod/ns labels.
@@ -509,13 +450,13 @@ func checkLabelCondition(labelCondition string, labels map[string]string) bool {
 	keyValue := strings.Split(labelCondition, "=")
 	key := keyValue[0]
 	value := keyValue[1]
-	if strings.HasPrefix(key, "^(") { // Label line: '^(label)=*'
+	if strings.HasPrefix(key, "!(") { // Label line: '!(label)=*'
 		return checkDoesNotExistCondition(key, labels)
-	} else if value == "*" { // prefix should be != '^(' also, Label line: 'label=*'
+	} else if value == "*" { // prefix should be != '!(' also, Label line: 'label=*'
 		return checkExistCondition(key, labels)
-	} else if strings.HasPrefix(value, "^(") { // Label line: 'label=(value1|...|valueN)'
+	} else if strings.HasPrefix(value, "!(") { // Label line: 'label=(value1|...|valueN)'
 		return checkNotInCondition(key, value, labels)
-	} else if strings.HasPrefix(value, "(") { // Label line: 'label=^(value1|...|valueN)'
+	} else if strings.HasPrefix(value, "(") { // Label line: 'label=!(value1|...|valueN)'
 		return checkInCondition(key, value, labels)
 	} else if labels[keyValue[0]] != keyValue[1] { // simple label filter
 		return false
@@ -532,10 +473,10 @@ func checkExistCondition(key string, labels map[string]string) bool {
 	return exist
 }
 
-// checkDoesNotExistCondition: check a DoesNotExist filter against a pod spec. Label line: '^(label)=*'
+// checkDoesNotExistCondition: check a DoesNotExist filter against a pod spec. Label line: '!(label)=*'
 // // Return true if the label key does not exist in pod spec
 func checkDoesNotExistCondition(key string, labels map[string]string) bool {
-	isolateKey := strings.TrimSuffix(strings.TrimPrefix(key, "^("), ")")
+	isolateKey := strings.TrimSuffix(strings.TrimPrefix(key, "!("), ")")
 	return !checkExistCondition(isolateKey, labels)
 }
 
@@ -556,10 +497,10 @@ func checkInCondition(key, value string, labels map[string]string) bool {
 	return false
 }
 
-// checkNotInCondition: check an NotIn filter against a pod spec. label line: 'label=^(value1|...|valueN)'
+// checkNotInCondition: check an NotIn filter against a pod spec. label line: 'label=!(value1|...|valueN)'
 // Return true if the label key is not set in pod OR do not have specific values
 func checkNotInCondition(key, value string, labels map[string]string) bool {
-	return !checkInCondition(key, strings.TrimPrefix(value, "^"), labels)
+	return !checkInCondition(key, strings.TrimPrefix(value, "!"), labels)
 }
 
 // Returns true if the slice contains the policy type
@@ -639,11 +580,6 @@ func addNetworkPolicy(networkPolicies []netv1.NetworkPolicy, file string, namesp
 	}
 
 	return networkPolicies, nil
-}
-
-// getNamespace: return a namespace given its name
-func getNamespace(clientset *kubernetes.Clientset, namespace string) (result *corev1.Namespace, err error) {
-	return clientset.CoreV1().Namespaces().Get(context.TODO(), namespace, metav1.GetOptions{})
 }
 
 // parsePodEndpoint: parse pod endpoint [ns]:[pod_name] or juste [pod] and return ns and pod struct associated

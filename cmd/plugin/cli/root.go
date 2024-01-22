@@ -19,7 +19,7 @@ var (
 
 func RootCmd() *cobra.Command {
 	var ingress, egress, allNamespaces bool
-	var pod, toPod, fromPod string
+	var pod, toPod, fromPod, toEndpoint, fromEndpoint string
 	var addNp, delNp []string
 
 	cmd := &cobra.Command{
@@ -82,6 +82,46 @@ func RootCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&fromPod, "from-pod", "f", "",
 		"Only selects ingress network policies rules enabling traffic from a specific pod. To specify a pod in the same ns --from-pod=[pod_name], in another namespace --from-pod=[ns]:[pod_name]")
 	cmd.MarkFlagsMutuallyExclusive("ingress", "to-pod")
+
+	testerCmd := &cobra.Command{
+		Use:           "kubectl-np-viewer tester",
+		Short:         "",
+		Long:          `.`,
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			viper.BindPFlags(cmd.Flags())
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			log := logger.NewLogger()
+			log.Info("")
+
+			finishedCh := make(chan bool, 1)
+			go func() {
+				for {
+					select {
+					case <-finishedCh:
+						fmt.Printf("\r")
+						return
+					}
+				}
+			}()
+
+			defer func() {
+				finishedCh <- true
+			}()
+
+			if err := plugin.RunTesterPlugin(KubernetesConfigFlags, cmd); err != nil {
+				return errors.Cause(err)
+			}
+			return nil
+		},
+	}
+	testerCmd.Flags().StringVarP(&toEndpoint, "to", "t", "",
+		"Only select netpol affecting this endpoint as source")
+	testerCmd.Flags().StringVarP(&fromEndpoint, "from-pod", "f", "",
+		"Only select netpol affecting this endpoint as destination")
+	cmd.AddCommand(testerCmd)
 	KubernetesConfigFlags = genericclioptions.NewConfigFlags(false)
 	KubernetesConfigFlags.AddFlags(cmd.Flags())
 
