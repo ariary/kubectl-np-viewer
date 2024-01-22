@@ -11,9 +11,6 @@ import (
 
 // Runs the plugin
 func RunPlugin(configFlags *genericclioptions.ConfigFlags, cmd *cobra.Command) error {
-	// 	~ RunPlugin ns de from avec --to-pod
-	// + ~ RunPlugin ns de to avec --from-pod
-
 	tableLines, err := GetTableNetpolLines(configFlags, cmd)
 	if err != nil {
 		return err

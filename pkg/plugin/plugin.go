@@ -391,6 +391,9 @@ func filterLinesBasedOnPodLabels(tableLines []TableLine, pod *corev1.Pod) []Tabl
 // Filters lines in the result table based on the pod and s labels. Depending on the pod/ns labels we will filter either on egress traffic or on ingress traffic.
 // policyTypeFilter: Ingress if we want to only look at egress traffic, Egress otherwise
 func filterLinesBasedOnSpecifictraffic(tableLines []TableLine, pod *corev1.Pod, ns *corev1.Namespace, policyTypeFilter string) []TableLine {
+	if !hasSpecificRuleType(tableLines, policyTypeFilter) {
+		fmt.Println("No", policyTypeFilter, "rules ⇒ all", policyTypeFilter, "connection are allowed")
+	}
 	var filteredTable []TableLine
 	for _, line := range tableLines {
 		if line.policyType != policyTypeFilter {
@@ -599,4 +602,24 @@ func parsePodEndpoint(clientset *kubernetes.Clientset, podName string, namespace
 		return nil, nil, errors.Wrap(err, "failed retrieveing ns")
 	}
 	return pod, ns, nil
+}
+
+// hasSpecificRuleType: return true if there is at least 1 egress/ingress policy
+func hasSpecificRuleType(tableLines []TableLine, policyType string) bool {
+	for i := 0; i < len(tableLines); i++ {
+		if tableLines[i].policyType == policyType {
+			return true
+		}
+	}
+	return false
+}
+
+// hasEgressRule: return true if there is at least 1 egress policy
+func hasEgressRule(tableLines []TableLine) bool {
+	return hasSpecificRuleType(tableLines, Egress)
+}
+
+// hasIngressRule: return true if there is at least 1 egress policy
+func hasIngressRule(tableLines []TableLine) bool {
+	return hasSpecificRuleType(tableLines, Ingress)
 }
