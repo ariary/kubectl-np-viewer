@@ -286,18 +286,20 @@ func createTableLineForPortBlock(policy netv1.NetworkPolicy, ports []netv1.Netwo
 }
 
 // Sorts and joins the labels with a new space delimiter based on podSelector field
-func sortAndJoinLabels(podSelector metav1.LabelSelector) string {
-	var macthExpressionLines string
-	if len(podSelector.MatchExpressions) != 0 {
-		macthExpressionLines = sortAndJoinLabelsForMatchExpressions(podSelector.MatchExpressions)
+func sortAndJoinLabels(selector metav1.LabelSelector) string {
+	if len(selector.MatchExpressions) == 0 && len(selector.MatchLabels) == 0 {
+		return Wildcard
 	}
 
-	return macthExpressionLines + sortAndJoinLabelsForMatchLabels(podSelector.MatchLabels)
+	var macthExpressionLines string
+	if len(selector.MatchExpressions) != 0 {
+		macthExpressionLines = sortAndJoinLabelsForMatchExpressions(selector.MatchExpressions)
+	}
+	return macthExpressionLines + sortAndJoinLabelsForMatchLabels(selector.MatchLabels)
 }
 
 // Sorts and joins the labels with a new space delimiter by parsing MatchLabels field
-func sortAndJoinLabelsForMatchLabels(labels map[string]string) string {
-	result := ""
+func sortAndJoinLabelsForMatchLabels(labels map[string]string) (result string) {
 	keys := make([]string, 0, len(labels))
 	for k := range labels {
 		keys = append(keys, k)
